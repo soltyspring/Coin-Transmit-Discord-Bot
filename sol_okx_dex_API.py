@@ -122,7 +122,7 @@ def ensure_wsol_account():
 
     print(f"[INFO] 현재 wSOL 잔액: {current_balance} lamports")
 
-    target_lamports = 7_500_000  # ✅ 최소 확보해야 할 wSOL = 0.005 SOL
+    target_lamports = 7_500_000  # 최소 확보해야 할 wSOL = 0.005 SOL
 
     if current_balance < target_lamports:
         wrap_amount = target_lamports - current_balance
