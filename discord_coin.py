@@ -1,215 +1,520 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
-import os, json
-from dotenv import load_dotenv
-from datetime import datetime
+import json, datetime, os, asyncio, discord
+from discord.ext import commands, tasks
 
-# Solana 모듈
-from sol_coin import send_spl_token, format_amount, get_spl_decimals
-# Ethereum 모듈
-from eth_coin import send_erc20, get_erc20_decimals
+from collections import OrderedDict
+from web3 import Web3
+from datetime import datetime, timezone
 
-# -------------------------------------------------------------------
-# ⚙️ 설정
-# -------------------------------------------------------------------
-load_dotenv()
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+from eth_coin import get_erc20_decimals, send_erc20
+from sol_coin import get_spl_decimals, send_spl_token
+from eth_okx_dex_API import swap_eth_to_token
+from sol_okx_dex_API import swap_sol_to_token_instruction
+from amount import get_amount_from_tx
+
 TOKENS_FILE = "tokens.json"
+NOTICE_FILE = "airdrop_explorers.json"
 
-# 하루 사용 제한
-USAGE_LIMIT = {}  # {user_id: {"count": int, "date": str}}
-MAX_USAGE = 3     # 하루 3번
+if os.path.exists(TOKENS_FILE):
+    with open(TOKENS_FILE, "r", encoding="utf-8") as f:
+        TOKENS = json.load(f)
+else:
+    TOKENS = {}
 
-def check_usage(user_id: int) -> bool:
-    today = datetime.utcnow().date().isoformat()
-    record = USAGE_LIMIT.get(user_id)
-
-    if record is None or record["date"] != today:
-        USAGE_LIMIT[user_id] = {"count": 0, "date": today}
-
-    if USAGE_LIMIT[user_id]["count"] >= MAX_USAGE:
-        return False
-
-    USAGE_LIMIT[user_id]["count"] += 1
-    return True
-
-
-# -------------------------------------------------------------------
-# 🔹 토큰 저장/로드
-# -------------------------------------------------------------------
-def load_tokens():
-    if os.path.exists(TOKENS_FILE):
-        with open(TOKENS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_tokens(tokens):
+def save_tokens():
     with open(TOKENS_FILE, "w", encoding="utf-8") as f:
-        json.dump(tokens, f, ensure_ascii=False, indent=2)
+        json.dump(TOKENS, f, indent=2, ensure_ascii=False)
 
-TOKENS = load_tokens()
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+def save_tokens():
+    # dict 를 OrderedDict 로 정렬해서 저장
+    ordered = OrderedDict(TOKENS)
+    with open(TOKENS_FILE, "w", encoding="utf-8") as f:
+        json.dump(ordered, f, indent=2, ensure_ascii=False)
+
+def add_token_first(symbol: str, data: dict):
+    global TOKENS
+    # 새 항목을 맨 앞에 삽입
+    TOKENS = {symbol.lower(): data, **TOKENS}
+    save_tokens()
 
 
 # -------------------------------------------------------------------
-# 🤖 디스코드 봇
+# 토큰 저장 / 불러오기
+# -------------------------------------------------------------------
+if os.path.exists(TOKENS_FILE):
+    with open(TOKENS_FILE, "r", encoding="utf-8") as f:
+        TOKENS = json.load(f)
+else:
+    TOKENS = {}
+
+def save_tokens():
+    with open(TOKENS_FILE, "w", encoding="utf-8") as f:
+        json.dump(TOKENS, f, indent=2, ensure_ascii=False)
+
+def add_token_first(symbol: str, data: dict):
+    global TOKENS
+    TOKENS = {symbol.lower(): data, **TOKENS}
+    save_tokens()
+
+# -------------------------------------------------------------------
+# 디스코드 봇 초기화
 # -------------------------------------------------------------------
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
-
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    try:
-        synced = await tree.sync()
-        print(f"🔗 Slash commands synced: {len(synced)}개")
-    except Exception as e:
-        print(f"❌ Sync 실패: {e}")
-
 
 # -------------------------------------------------------------------
-# 🔹 관리자 전용 체크
+# 신규 토큰 등록 버튼 → RegisterModal 연결
 # -------------------------------------------------------------------
-def is_admin():
-    async def predicate(interaction: discord.Interaction) -> bool:
-        return interaction.user.guild_permissions.administrator
-    return app_commands.check(predicate)
 
 
-# -------------------------------------------------------------------
-# 🔹 토큰 등록 (decimals 자동 감지)
-# -------------------------------------------------------------------
-@tree.command(name="registertoken", description="토큰 등록 (관리자 전용, decimals 자동 감지)")
-@is_admin()
-async def registertoken(
-    interaction: discord.Interaction,
-    chain: str,      # sol / eth
-    name: str,       # 토큰 이름
-    address: str,    # Mint 주소(솔라나) 또는 컨트랙트 주소(이더리움)
-    amount: float    # 기본 전송 수량
-):
-    chain = chain.lower()
-    if chain not in ["sol", "eth"]:
-        await interaction.response.send_message("❌ chain 값은 `sol` 또는 `eth` 만 가능합니다.")
-        return
+class RegisterNewTokenView(discord.ui.View):
+    def __init__(self, coin_data: dict):
+        super().__init__(timeout=None)
+        self.coin_data = coin_data
 
-    try:
-        if chain == "sol":
-            decimals = get_spl_decimals(address)
-        else:
-            decimals = get_erc20_decimals(address)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Decimals 자동 감지 실패: {e}")
-        return
-
-    TOKENS[name] = {
-        "chain": chain,
-        "address": address,
-        "decimals": decimals,
-        "amount": amount
-    }
-    save_tokens(TOKENS)
-
-    await interaction.response.send_message(
-        f"✅ 토큰 등록 완료!\n"
-        f"체인: `{chain}`\n이름: `{name}`\n주소: `{address}`\nDecimals: `{decimals}`\nAmount: `{amount}`"
-    )
-
+    @discord.ui.button(label="📥 신규 코인 등록하기", style=discord.ButtonStyle.green)
+    async def register_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 코인 기본값을 RegisterModal에 넘겨줌
+        modal = RegisterModal(
+            chain=self.coin_data["chain"].lower(),
+            symbol=self.coin_data["coin"],
+            address=self.coin_data["contract"]
+        )
+        await interaction.response.send_modal(modal)
 
 # -------------------------------------------------------------------
-# 🔹 Modal (지갑주소 입력)
+# 등록용 모달
 # -------------------------------------------------------------------
-class WalletModal(discord.ui.Modal, title="지갑 주소 입력"):
-    wallet = discord.ui.TextInput(label="받는 지갑 주소", required=True)
-
-    def __init__(self, name: str, data: dict):
+class RegisterModal(discord.ui.Modal, title="코인 등록하기"):
+    def __init__(self, chain="", symbol="", address=""):
         super().__init__()
-        self.name = name
-        self.data = data
+
+        # ✅ 입력창을 __init__ 안에서 생성
+        self.chain_input = discord.ui.TextInput(
+            label="체인 (eth/sol)",
+            default=chain,
+            required=True
+        )
+        self.symbol_input = discord.ui.TextInput(
+            label="코인 심볼",
+            default=symbol,
+            required=True
+        )
+        self.address_input = discord.ui.TextInput(
+            label="컨트렉 주소",
+            default=address,
+            required=True
+        )
+
+        # ✅ 모달에 추가
+        self.add_item(self.chain_input)
+        self.add_item(self.symbol_input)
+        self.add_item(self.address_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
         try:
-            if self.data["chain"] == "sol":
-                sig = send_spl_token(
-                    self.data["address"],
-                    str(self.wallet),
-                    self.data["amount"],
-                    self.data["decimals"]
-                )
-                link = f"https://solscan.io/tx/{sig}"
-            else:  # eth
-                sig = send_erc20(
-                    self.data["address"],
-                    str(self.wallet),
-                    self.data["amount"],
-                    self.data["decimals"]
-                )
-                link = f"https://etherscan.io/tx/{sig}"
+            chain = self.chain_input.value.lower()
+            symbol = self.symbol_input.value
+            address = self.address_input.value
 
-            await interaction.response.send_message(
-                f"✅ {self.data['amount']} {self.name} 전송 완료!\n[트랜잭션 확인]({link})"
-            )
+            if chain == "eth":
+                # ETH 등록 처리
+                decimals = get_erc20_decimals(address)
+                fixed_amount = 0.00025
+                wei_amount = Web3.to_wei(fixed_amount, "ether")
+                tx_hash = swap_eth_to_token(address, wei_amount)
+
+                msg = f"✅ {symbol.upper()} 등록 및 {fixed_amount} ETH 매수 전송!\n"
+                msg += f"[Etherscan 확인](https://etherscan.io/tx/{tx_hash})"
+
+                admin_channel = interaction.client.get_channel(int(os.getenv("DISCORD_ADMIN_CHANNEL")))
+                if admin_channel:
+                    await admin_channel.send(msg)
+
+                # 1분 뒤 수량 조회 → 저장
+                async def delayed_save():
+                    from amount import get_amount_from_tx
+                    await asyncio.sleep(60)
+
+                    save_amount = get_amount_from_tx(tx_hash)
+                    add_token_first(symbol.lower(), {
+                        "chain": "eth",
+                        "address": address,
+                        "decimals": decimals,
+                        "amount": save_amount
+                    })
+                    save_tokens()
+
+                    final_msg = f"✅ {symbol.upper()} 등록완료 : 1인 전송 수량: {save_amount}"
+
+                    if admin_channel:
+                        await admin_channel.send(final_msg)
+                    announce_channel = interaction.client.get_channel(int(os.getenv("DISCORD_ANNOUNCE_CHANNEL")))
+                    if announce_channel:
+                        await announce_channel.send(final_msg)
+
+                    await self.refresh_menus(interaction)
+
+                asyncio.create_task(delayed_save())
+
+            elif chain == "sol":
+                # SOL 등록 처리
+                decimals = get_spl_decimals(address)
+                fixed_amount = 0.0025
+                lamports = int(fixed_amount * 10**9)
+
+                tx_sig = swap_sol_to_token_instruction(address, lamports)
+                tx_hash = str(tx_sig)
+
+                msg = f"✅ {symbol.upper()} 등록 및 {fixed_amount} SOL 매수 전송!\n"
+                msg += f"[Solscan 확인](https://solscan.io/tx/{tx_hash})"
+
+                admin_channel = interaction.client.get_channel(int(os.getenv("DISCORD_ADMIN_CHANNEL")))
+                if admin_channel:
+                    await admin_channel.send(msg)
+
+                # 20초 뒤 수량 조회 → 저장
+                async def delayed_save():
+                    from amount import get_amount_from_tx
+                    await asyncio.sleep(20)
+
+                    save_amount = get_amount_from_tx(tx_hash)
+                    add_token_first(symbol.lower(), {
+                        "chain": "sol",
+                        "address": address,
+                        "decimals": decimals,
+                        "amount": save_amount
+                    })
+                    save_tokens()
+
+                    final_msg = f"✅ {symbol.upper()} 등록완료 : 1인 전송 수량: {save_amount}"
+
+                    if admin_channel:
+                        await admin_channel.send(final_msg)
+                    announce_channel = interaction.client.get_channel(int(os.getenv("DISCORD_ANNOUNCE_CHANNEL")))
+                    if announce_channel:
+                        await announce_channel.send(final_msg)
+
+                    await self.refresh_menus(interaction)
+
+                asyncio.create_task(delayed_save())
+
+            else:
+                await interaction.followup.send("❌ 지원하지 않는 체인입니다. (eth/sol 만 가능)")
+                return
+
+            save_tokens()
+
         except Exception as e:
-            await interaction.response.send_message(f"❌ 전송 실패: {e}")
+            await interaction.followup.send(f"❌ 등록 실패: {str(e)}")
+
+    async def refresh_menus(self, interaction: discord.Interaction):
+        """관리자/사용자 채널 메뉴 새로고침"""
+        admin_channel = interaction.client.get_channel(int(os.getenv("DISCORD_ADMIN_CHANNEL")))
+        user_channel = interaction.client.get_channel(int(os.getenv("DISCORD_USER_CHANNEL")))
+
+        if admin_channel:
+            await clear_old_menus(admin_channel)
+            view_admin = MainView(is_admin=True)
+            msg_admin = await admin_channel.send("⚙️ 관리자용 코인 관리 메뉴", view=view_admin)
+            view_admin.menu_message = msg_admin
+
+        if user_channel:
+            await clear_old_menus(user_channel)
+            view_user = MainView(is_admin=False)
+            msg_user = await user_channel.send("📤 코인을 전송하려면 클릭하세요:", view=view_user)
+            view_user.menu_message = msg_user
+
+
 
 
 # -------------------------------------------------------------------
-# 🔹 드롭다운 (토큰 선택)
+# 전송용 모달
 # -------------------------------------------------------------------
-class TokenSelect(discord.ui.View):
-    def __init__(self, author: discord.User):
-        super().__init__(timeout=60)
-        self.author = author
+class WalletModal(discord.ui.Modal, title="받는 지갑 주소 입력"):
+    wallet = discord.ui.TextInput(label="받는 지갑 주소", required=True)
 
-        options = [
-            discord.SelectOption(
-                label=name,
-                description=f"{format_amount(data['amount'], data['decimals'])}개 전송",
-                value=name
+    def __init__(self, token_symbol: str, parent_message: discord.Message, is_admin: bool):
+        super().__init__()
+        self.token_symbol = token_symbol
+        self.parent_message = parent_message
+        self.is_admin = is_admin
+
+    async def on_submit(self, interaction: discord.Interaction):
+        token = TOKENS[self.token_symbol]
+        amount_value = token["amount"]
+
+        try:
+            if token["chain"] == "eth":
+                tx_hash = send_erc20(token["address"], self.wallet.value, amount_value, token["decimals"])
+                result_msg = (
+                    f"🤗 {interaction.user.mention}\n"
+                    f"  {amount_value} {self.token_symbol.upper()} 전송 완료!\n"
+                    f"[트랜잭션 확인](https://etherscan.io/tx/{tx_hash})"
+                )
+
+            elif token["chain"] == "sol":
+                sig = send_spl_token(token["address"], self.wallet.value, amount_value, token["decimals"])
+                result_msg = (
+                    f"🤗 {interaction.user.mention}\n"
+                    f"  {amount_value} {self.token_symbol.upper()} 전송 완료!\n"
+                    f"[트랜잭션 확인](https://explorer.solana.com/tx/{sig}?cluster=mainnet-beta)"
+                )
+            else:
+                result_msg = "❌ 지원하지 않는 체인입니다."
+
+        except Exception as e:
+            result_msg = f"❌ 전송 실패: {str(e)}"
+
+        # ✅ 결과 메시지 (공개 메시지)
+        await interaction.response.send_message(result_msg)
+
+        # ✅ 이전 메뉴 삭제
+        try:
+            await self.parent_message.delete()
+        except Exception:
+            pass
+
+        # ✅ 새 메뉴 띄우기
+        channel = interaction.channel
+        view = MainView(is_admin=self.is_admin)
+        msg = await channel.send("📤 코인을 전송하려면 클릭하세요:", view=view)
+        view.menu_message = msg
+
+# -------------------------------------------------------------------
+# 버튼 UI
+# -------------------------------------------------------------------
+class MainView(discord.ui.View):
+    def __init__(self, is_admin=False):
+        super().__init__(timeout=None)
+        self.is_admin = is_admin
+        self.menu_message: discord.Message | None = None
+
+        # ✅ 토큰마다 버튼 생성
+        for symbol in TOKENS.keys():
+            self.add_item(self.TokenButton(symbol, self))
+
+        # ✅ 관리자 전용 버튼
+        if self.is_admin:
+            self.add_item(self.RegisterButton())
+
+    class TokenButton(discord.ui.Button):
+        def __init__(self, symbol, parent_view):
+            super().__init__(
+                label=f"📤 {symbol.upper()} 전송",
+                style=discord.ButtonStyle.blurple
             )
-            for name, data in TOKENS.items()
-        ]
+            self.symbol = symbol
+            self.parent_view = parent_view
 
-        self.select = discord.ui.Select(
-            placeholder="코인을 선택하세요",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
+        async def callback(self, interaction: discord.Interaction):
+            await interaction.response.send_modal(
+                WalletModal(self.symbol, self.parent_view.menu_message, self.parent_view.is_admin)
+            )
 
-    async def select_callback(self, interaction: discord.Interaction):
-        if interaction.user != self.author:
-            await interaction.response.send_message("❌ 이 메뉴는 당신이 사용할 수 없습니다.", ephemeral=True)
-            return
+    class RegisterButton(discord.ui.Button):
+        def __init__(self):
+            super().__init__(label="📥 코인 등록 (관리자 전용)", style=discord.ButtonStyle.green)
 
-        name = self.select.values[0]
-        data = TOKENS[name]
-        await interaction.response.send_modal(WalletModal(name, data))
-
-
+        async def callback(self, interaction: discord.Interaction):
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message("❌ 이 기능은 관리자 전용입니다.", ephemeral=True)
+                return
+            await interaction.response.send_modal(RegisterModal())
 # -------------------------------------------------------------------
-# 🔹 /send (하루 3회 제한)
+# 신규 공지 체크 로직 (한 번 실행)
 # -------------------------------------------------------------------
-@tree.command(name="send", description="토큰 전송 (드롭다운 선택 → 지갑주소 입력)")
-async def send(interaction: discord.Interaction):
-    if not check_usage(interaction.user.id):
-        await interaction.response.send_message("❌ 하루 사용 가능 횟수(3회)를 모두 사용했습니다.", ephemeral=True)
+async def run_check_new_notices():
+    if not os.path.exists(NOTICE_FILE):
         return
 
-    if not TOKENS:
-        await interaction.response.send_message("❌ 등록된 토큰이 없습니다. `/registertoken` 먼저 실행하세요.")
+    with open(NOTICE_FILE, "r", encoding="utf-8") as f:
+        notices = json.load(f)
+
+    announce_channel_id = int(os.getenv("DISCORD_ANNOUNCE_CHANNEL"))  # 사용자 공지 채널
+    admin_channel_id = int(os.getenv("DISCORD_ADMIN_CHANNEL"))        # 관리자 채널
+
+    announce_channel = bot.get_channel(announce_channel_id)
+    admin_channel = bot.get_channel(admin_channel_id)
+
+    for event in notices:
+        for coin in event["coins"]:
+            symbol = coin["coin"].lower()
+            if symbol not in TOKENS:  # 기존에 없으면 신규
+                embed = discord.Embed(
+                    title=f"🚀 빗썸 신규 에어드랍: {coin['coin']}",
+                    color=discord.Color.green()
+                )
+
+                embed.add_field(
+                    name="이벤트",
+                    value=f"[{event['event_title']}]({event['event_url']})",
+                    inline=False
+                )
+                embed.add_field(name="체인", value=coin["chain"], inline=True)
+
+                chain = coin["chain"].lower()
+                if chain == "eth":
+                    scan_url = f"https://etherscan.io/token/{coin['contract']}"
+                elif chain == "sol":
+                    scan_url = f"https://solscan.io/token/{coin['contract']}"
+                elif chain == "bsc":
+                    scan_url = f"https://bscscan.com/token/{coin['contract']}"
+                elif chain == "polygon":
+                    scan_url = f"https://polygonscan.com/token/{coin['contract']}"
+                else:
+                    scan_url = coin["contract"]
+
+                embed.add_field(
+                    name="컨트랙트",
+                    value=f"[{coin['contract']}]({scan_url})",
+                    inline=False
+                )
+
+                # 사용자 채널 → 공지만
+                if announce_channel:
+                    await announce_channel.send(embed=embed)
+
+                # 관리자 채널 → 공지 + 등록 버튼
+                if admin_channel:
+                    view = RegisterNewTokenView(coin)
+                    await admin_channel.send(embed=embed, view=view)
+
+
+# -------------------------------------------------------------------
+# 기존 메뉴 메시지 삭제 함수
+# -------------------------------------------------------------------
+async def clear_old_menus(channel: discord.TextChannel):
+    async for msg in channel.history(limit=None):  # ✅ limit=None → 전부 확인
+        if msg.author == bot.user and (
+            "⚙️ 관리자용 코인 관리 메뉴" in msg.content
+            or "📤 코인을 전송하려면 클릭하세요:" in msg.content
+        ):
+            try:
+                await msg.delete()
+                print(f"🗑️ 이전 메뉴 메시지 삭제: {msg.content}")
+            except Exception as e:
+                print(f"❌ 메시지 삭제 실패: {e}")
+
+
+# -------------------------------------------------------------------
+# 봇 실행
+# -------------------------------------------------------------------
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"✅ 로그인 완료: {bot.user}")
+
+    # 관리자 / 사용자 채널 ID 가져오기
+    admin_channel_id = int(os.getenv("DISCORD_ADMIN_CHANNEL"))
+    user_channel_id = int(os.getenv("DISCORD_USER_CHANNEL"))
+
+    admin_channel = bot.get_channel(admin_channel_id)
+    user_channel = bot.get_channel(user_channel_id)
+
+    # ✅ 관리자 채널 처리
+    if admin_channel:
+        await clear_old_menus(admin_channel)  # 기존 메뉴 삭제
+        view = MainView(is_admin=True)
+        msg = await admin_channel.send("⚙️ 관리자용 코인 관리 메뉴", view=view)
+        view.menu_message = msg
+        print("📨 관리자 채널에 새 메뉴 전송 완료")
+    else:
+        print("❌ 관리자 채널을 찾을 수 없습니다")
+
+    # ✅ 사용자 채널 처리
+    if user_channel:
+        await clear_old_menus(user_channel)  # 기존 메뉴 삭제
+        view = MainView(is_admin=False)
+        msg = await user_channel.send("📤 코인을 전송하려면 클릭하세요:", view=view)
+        view.menu_message = msg
+        print("📨 사용자 채널에 새 메뉴 전송 완료")
+    else:
+        print("❌ 사용자 채널을 찾을 수 없습니다")
+
+    # ✅ 실행 직후 한 번 강제 실행
+    await run_check_new_notices()
+
+    # ✅ 이후 주기적으로 실행
+    check_new_notices.start()
+
+
+
+@tasks.loop(minutes=1)
+async def check_new_notices():
+    now = datetime.now(timezone.utc)
+    if now.minute != 0:  # 매 정각만 실행
+        return
+    
+    if not os.path.exists(NOTICE_FILE):
         return
 
-    await interaction.response.send_message(
-        "📌 전송할 코인을 선택하세요:",
-        view=TokenSelect(interaction.user)
-    )
+    with open(NOTICE_FILE, "r", encoding="utf-8") as f:
+        notices = json.load(f)
+
+    announce_channel_id = int(os.getenv("DISCORD_ANNOUNCE_CHANNEL"))
+    admin_channel_id = int(os.getenv("DISCORD_ADMIN_CHANNEL"))
+
+    announce_channel = bot.get_channel(announce_channel_id)
+    admin_channel = bot.get_channel(admin_channel_id)
+
+    for event in notices:
+        for coin in event["coins"]:
+            symbol = coin["coin"].lower()
+            if symbol not in TOKENS:  # 기존에 없으면 신규
+                embed = discord.Embed(
+                    title=f"🚀 빗썸 신규 에어드랍: {coin['coin']}",
+                    color=discord.Color.green()
+                )
+
+                embed.add_field(
+                    name="이벤트",
+                    value=f"[{event['event_title']}]({event['event_url']})",
+                    inline=False
+                )
+                embed.add_field(name="체인", value=coin["chain"], inline=True)
+
+                chain = coin["chain"].lower()
+                if chain == "eth":
+                    scan_url = f"https://etherscan.io/token/{coin['contract']}"
+                elif chain == "sol":
+                    scan_url = f"https://solscan.io/token/{coin['contract']}"
+                elif chain == "bsc":
+                    scan_url = f"https://bscscan.com/token/{coin['contract']}"
+                elif chain == "polygon":
+                    scan_url = f"https://polygonscan.com/token/{coin['contract']}"
+                else:
+                    scan_url = coin["contract"]
+
+                embed.add_field(
+                    name="컨트랙트",
+                    value=f"[{coin['contract']}]({scan_url})",
+                    inline=False
+                )
+
+                # 사용자 채널 → 공지만
+                if announce_channel:
+                    await announce_channel.send(embed=embed)
+
+                # 관리자 채널 → 공지 + 등록 버튼
+                if admin_channel:
+                    view = RegisterNewTokenView(coin)
+                    await admin_channel.send(embed=embed, view=view)
 
 
-# -------------------------------------------------------------------
-# 실행
-# -------------------------------------------------------------------
-bot.run(DISCORD_TOKEN)
+
+@check_new_notices.before_loop
+async def before_check_new_notices():
+    await bot.wait_until_ready()
+    print("⏳ check_new_notices 준비 완료")
+
+if __name__ == "__main__":
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    if not TOKEN:
+        raise RuntimeError("❌ DISCORD_BOT_TOKEN 환경 변수가 필요합니다.")
+    bot.run(TOKEN)

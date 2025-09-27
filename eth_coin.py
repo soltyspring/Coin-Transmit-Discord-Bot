@@ -73,6 +73,7 @@ def send_erc20(token_address: str, to_address: str, amount: float, decimals: int
     )
 
     nonce = w3.eth.get_transaction_count(MY_ADDRESS)
+    gas_price = w3.eth.gas_price  # ✅ 현재 네트워크 가스비 조회
 
     tx = token.functions.transfer(
         Web3.to_checksum_address(to_address),
@@ -80,11 +81,26 @@ def send_erc20(token_address: str, to_address: str, amount: float, decimals: int
     ).build_transaction({
         "from": MY_ADDRESS,
         "nonce": nonce,
-        "gas": 100000,  # ERC20 전송은 가스가 네이티브 전송보다 큼
-        "gasPrice": w3.to_wei("30", "gwei"),
+        "gas": 100000,   # ERC20 전송 기본 예상치
+        "gasPrice": gas_price,  # ✅ 동적 가스비 적용
     })
 
     signed_tx = w3.eth.account.sign_transaction(tx, ETH_PRIVATE_KEY)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
 
     return w3.to_hex(tx_hash)
+
+
+# -------------------------------------------------------------------
+# 실행 테스트
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    token_address = "0xc3d91c9c4fcbcda17c36103801f55335531bf379"
+    to_address = "0x24f5cceda997b3ca3d837ea1c55f09410e5fb257"
+
+    decimals = get_erc20_decimals(token_address)
+    print("Decimals:", decimals)
+
+    tx_hash = send_erc20(token_address, to_address, 0.1, decimals)
+    print("TX Hash:", tx_hash)
+    print("Etherscan:", f"https://etherscan.io/tx/{tx_hash}")
