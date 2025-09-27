@@ -110,11 +110,11 @@ def sync_native_solders(account: Pubkey) -> Instruction:
 # ---------------------------------------------------------
 # wSOL ATA 체크 및 래핑
 # ---------------------------------------------------------
-def ensure_wsol_account(min_lamports: int):
+def ensure_wsol_account():
     owner = Pubkey.from_string(SOL_ADDRESS)
     wsol_ata = get_associated_token_address(owner, WRAPPED_SOL_MINT)
 
-    # wSOL ATA 잔액 확인
+    # 현재 wSOL ATA 잔액 확인
     balance_resp = client.get_token_account_balance(wsol_ata)
     current_balance = 0
     if balance_resp.value is not None:
@@ -122,9 +122,11 @@ def ensure_wsol_account(min_lamports: int):
 
     print(f"[INFO] 현재 wSOL 잔액: {current_balance} lamports")
 
-    # 필요한 수량보다 부족하면만 래핑
-    if current_balance < min_lamports:
-        print(f"[INFO] wSOL 부족 → {min_lamports - current_balance} lamports 래핑 필요")
+    target_lamports = 7_500_000  # ✅ 최소 확보해야 할 wSOL = 0.005 SOL
+
+    if current_balance < target_lamports:
+        wrap_amount = target_lamports - current_balance
+        print(f"[INFO] {wrap_amount} lamports SOL → wSOL 래핑 (목표: {target_lamports})")
 
         info = client.get_account_info(wsol_ata)
         instructions = []
@@ -140,8 +142,6 @@ def ensure_wsol_account(min_lamports: int):
             )
 
         # SOL → wSOL 입금
-        wrap_amount = min_lamports - current_balance
-        print(f"[INFO] {wrap_amount} lamports SOL → wSOL 래핑")
         instructions.append(
             transfer(TransferParams(from_pubkey=owner, to_pubkey=wsol_ata, lamports=wrap_amount))
         )
@@ -164,9 +164,11 @@ def ensure_wsol_account(min_lamports: int):
         sig = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True))
         print("[INFO] wSOL 래핑 완료:", sig.value)
     else:
-        print("[INFO] wSOL 충분 → 래핑 생략")
+        print("[INFO] 이미 0.005 SOL 이상 보유 → 추가 래핑 없음")
 
     return wsol_ata
+
+
 
 
 # ---------------------------------------------------------
@@ -198,8 +200,8 @@ def build_instructions(instr_list: list) -> list:
 # SOL → SPL 토큰 스왑 실행
 # ---------------------------------------------------------
 def swap_sol_to_token_instruction(to_token_address: str, lamports: int, slippage="5") -> str:
-    # 1. 먼저 wSOL 준비
-    ensure_wsol_account(lamports)
+    # 1. 먼저 wSOL 준비 (0.005 SOL 채워놓음)
+    ensure_wsol_account()
 
     # 2. OKX aggregator swap instruction API
     path = "/api/v6/dex/aggregator/swap-instruction"
@@ -207,7 +209,7 @@ def swap_sol_to_token_instruction(to_token_address: str, lamports: int, slippage
         "chainIndex": CHAIN_INDEX,
         "fromTokenAddress": str(WRAPPED_SOL_MINT),
         "toTokenAddress": to_token_address,
-        "amount": str(lamports),
+        "amount": str(lamports),   # ✅ 스왑은 매개변수 lamports 사용
         "slippagePercent": slippage,
         "userWalletAddress": SOL_ADDRESS,
     }
@@ -221,12 +223,12 @@ def swap_sol_to_token_instruction(to_token_address: str, lamports: int, slippage
     swap_data = resp["data"]
     instr_list = swap_data["instructionLists"]
 
-    # Instruction 생성 (전부 solders.Instruction)
+    # Instruction 생성
     instructions = build_instructions(instr_list)
 
     # 최신 blockhash
     bh_resp = client.get_latest_blockhash()
-    blockhash = bh_resp.value.blockhash   # ✅ Hash.from_string 제거
+    blockhash = bh_resp.value.blockhash
 
     # 트랜잭션 생성 및 서명
     keypair = load_keypair_from_base58(SOL_PRIVATE_KEY)
@@ -241,7 +243,6 @@ def swap_sol_to_token_instruction(to_token_address: str, lamports: int, slippage
     # 전송
     result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True))
     return result.value
-
 
 # ---------------------------------------------------------
 # 실행 예시
