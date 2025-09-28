@@ -38,7 +38,7 @@ def safe_request(url):
 
 def fetch_recent_notices(size=20):
     """최근 공지 size개 가져오기"""
-    resp = requests.get(
+    resp = scraper.get(   # 🔥 requests → scraper
         LIST_URL,
         headers=HEADERS,
         params={"page": 1, "count": size}
@@ -48,12 +48,18 @@ def fetch_recent_notices(size=20):
 
 def fetch_notice_links(url):
     """이벤트 공지에서 거래지원 안내 링크 추출"""
-    resp = safe_request(url)
-    resp.raise_for_status()
+    try:
+        resp = safe_request(url)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"⚠️ 링크 요청 실패 ({url}) → {e}")
+        return []
+
     soup = BeautifulSoup(resp.text, "html.parser")
     content_div = soup.select_one("div[class^=NoticeDetailContent_detail-content]")
     if not content_div:
         return []
+
     links = []
     for a in content_div.find_all("a", href=True):
         text = a.get_text(strip=True)
@@ -111,42 +117,42 @@ if __name__ == "__main__":
 
     notices = fetch_recent_notices(size=20)
 
-    for item in notices:
-        title = item.get("title", "")
-        url = item.get("pc_url")
+for item in notices:
+    title = item.get("title", "")
+    url = item.get("pc_url")
 
-        # 에어드랍 이벤트만 추출
-        if "에어드랍" not in title:
-            continue
+    # 에어드랍 이벤트만 추출
+    if "에어드랍" not in title:
+        continue
 
-        print(f"📌 이벤트 공지: {title}")
-        print("URL:", url)
+    print(f"📌 이벤트 공지: {title}")
+    print("URL:", url)
 
-        # 이벤트 공지에서 거래지원 안내 링크 추출
-        support_links = fetch_notice_links(url)
-        print("거래지원 안내 링크:", len(support_links), "개")
+    # 이벤트 공지에서 거래지원 안내 링크 추출
+    support_links = fetch_notice_links(url)
+    print("거래지원 안내 링크:", len(support_links), "개")
 
-        coin_data = []
-        for link in support_links:
-            matched = fetch_coins_and_explorers(link["url"])
-            coin_data.extend(matched)
+    # ✅ 링크가 없으면 그냥 넘어감
+    if not support_links:
+        print("⚠️ 거래지원 안내 링크 없음 → 스킵")
+        continue
 
-        record = {
-            "event_title": title,
-            "event_url": url,
-            "coins": []
-        }
+    record = {
+        "event_title": title,
+        "event_url": url,
+        "coins": []
+    }
 
-        event_coins = re.findall(r"\(([A-Za-z0-9]+)\)", title)
+    event_coins = re.findall(r"\(([A-Za-z0-9]+)\)", title)
 
-        for link in support_links:
-            matched = fetch_coins_and_explorers(link["url"])
-            matched = [c for c in matched if c["coin"] in event_coins]
-            record["coins"].extend(matched)
+    for link in support_links:
+        matched = fetch_coins_and_explorers(link["url"])
+        matched = [c for c in matched if c["coin"] in event_coins]
+        record["coins"].extend(matched)
 
-        # ✅ coins가 비어있지 않을 때만 저장
-        if record["coins"]:
-            new_data.append(record)
+    if record["coins"]:
+        new_data.append(record)
+
 
 
     save_airdrops(new_data)

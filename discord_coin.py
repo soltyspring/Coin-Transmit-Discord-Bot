@@ -1,6 +1,6 @@
 import json, datetime, os, asyncio, discord
 from discord.ext import commands, tasks
-
+from discord import ui, ButtonStyle
 from collections import OrderedDict
 from web3 import Web3
 from datetime import datetime, timezone
@@ -334,6 +334,37 @@ class MainView(discord.ui.View):
 # -------------------------------------------------------------------
 # 신규 공지 체크 로직 (한 번 실행)
 # -------------------------------------------------------------------
+# 👇 run_check_new_notices 안에 embed 전송 직전에 버튼 view 추가
+from discord import ui
+
+class DepositView(ui.View):
+    def __init__(self, coin_name: str, deposit_url: str):
+        super().__init__(timeout=None)
+        # ✅ 강조된 입금 버튼 (링크 버튼)
+        self.add_item(ui.Button(
+            label=f"👉 {coin_name} 입금하기 👈",
+            url=deposit_url,
+            style=ButtonStyle.link
+        ))
+
+# -------------------------------------------------------------------
+# 공지 체크 함수
+# -------------------------------------------------------------------
+from discord import ui, ButtonStyle
+
+# 🔘 입금 버튼 View
+class DepositView(ui.View):
+    def __init__(self, coin_name: str, deposit_url: str):
+        super().__init__(timeout=None)
+        self.add_item(ui.Button(
+            label=f"👉 {coin_name} 입금하기 👈",
+            url=deposit_url,
+            style=ButtonStyle.link
+        ))
+
+# -------------------------------------------------------------------
+# 공지 체크 함수
+# -------------------------------------------------------------------
 async def run_check_new_notices():
     if not os.path.exists(NOTICE_FILE):
         return
@@ -345,9 +376,8 @@ async def run_check_new_notices():
     admin_channel_id = int(os.getenv("DISCORD_ADMIN_CHANNEL"))
 
     announce_channel = bot.get_channel(announce_channel_id)
-    admin_channel = bot.get_channel(admin_channel_id)   # ✅ 추가
+    admin_channel = bot.get_channel(admin_channel_id)
 
-    # notice_messages.json 로드
     notice_map = {}
     if os.path.exists("notice_messages.json"):
         with open("notice_messages.json", "r", encoding="utf-8") as f:
@@ -356,16 +386,15 @@ async def run_check_new_notices():
     for event in notices:
         for coin in event["coins"]:
             symbol = coin["coin"].lower()
+            deposit_url = f"https://www.bithumb.com/react/inout/deposit/{coin['coin']}"
 
             # 이미 등록된 경우 건너뜀
             if symbol in notice_map:
                 continue
 
-            # 신규 공지 embed
             embed = discord.Embed(
-                title=f"🚀 빗썸 신규 에어드랍: {coin['coin']}",
-                description="현재 미등록 상태",
-                color=discord.Color.green()
+                title=f"🚀 **빗썸 {coin['coin']} 신규 에어드랍** 🚀",
+                color=discord.Color.gold()  # ⭐ 강조색
             )
 
             embed.add_field(
@@ -373,7 +402,6 @@ async def run_check_new_notices():
                 value=f"[{event['event_title']}]({event['event_url']})",
                 inline=False
             )
-            embed.add_field(name="체인", value=coin["chain"], inline=True)
 
             chain = coin["chain"].lower()
             if chain == "eth":
@@ -393,19 +421,23 @@ async def run_check_new_notices():
                 inline=False
             )
 
+            # 🔘 입금 버튼 View
+            deposit_view = DepositView(coin["coin"], deposit_url)
+
             # 사용자 채널 → 공지 등록
             if announce_channel:
-                msg = await announce_channel.send(embed=embed)
+                msg = await announce_channel.send(embed=embed, view=deposit_view)
 
-                # 메시지 ID 저장
                 notice_map[symbol] = msg.id
                 with open("notice_messages.json", "w", encoding="utf-8") as f:
                     json.dump(notice_map, f, indent=2, ensure_ascii=False)
 
-
-            # 관리자 채널 → 공지 + 등록 버튼
+            # 관리자 채널 → 공지 + 등록 버튼 + 입금 버튼
             if admin_channel:
                 view = RegisterNewTokenView(coin)
+                # DepositView의 버튼을 그대로 복사해서 추가
+                for item in deposit_view.children:
+                    view.add_item(item)
                 await admin_channel.send(embed=embed, view=view)
 
 
@@ -472,7 +504,8 @@ async def on_ready():
 @tasks.loop(minutes=1)
 async def check_new_notices():
     now = datetime.now(timezone.utc)
-    if now.minute != 0:  # 매 정각만 실행
+    # ✅ 한국시간 23:40 → UTC 14:40
+    if not (now.hour == 14 and now.minute == 40):
         return
     
     if not os.path.exists(NOTICE_FILE):
@@ -496,22 +529,22 @@ async def check_new_notices():
     for event in notices:
         for coin in event["coins"]:
             symbol = coin["coin"].lower()
+            deposit_url = f"https://www.bithumb.com/react/inout/deposit/{coin['coin']}"
 
             # 이미 등록된 경우 건너뜀
             if symbol in notice_map:
                 continue
 
             embed = discord.Embed(
-                title=f"🚀 빗썸 신규 에어드랍: {coin['coin']}",
-                description="현재 미등록 상태",
-                color=discord.Color.green()
+                title=f"🚀 **빗썸 {coin['coin']} 신규 에어드랍** 🚀",
+                color=discord.Color.gold()  # ⭐ 강조색
             )
+
             embed.add_field(
                 name="이벤트",
                 value=f"[{event['event_title']}]({event['event_url']})",
                 inline=False
             )
-            embed.add_field(name="체인", value=coin["chain"], inline=True)
 
             chain = coin["chain"].lower()
             if chain == "eth":
@@ -531,18 +564,22 @@ async def check_new_notices():
                 inline=False
             )
 
-            # 사용자 채널 → 공지 등록
-            if announce_channel:
-                msg = await announce_channel.send(embed=embed)
+            # 🔘 입금 버튼 생성
+            deposit_view = DepositView(coin["coin"], deposit_url)
 
-                # 메시지 ID 저장
+            # 사용자 채널 → 공지 등록 (입금 버튼만)
+            if announce_channel:
+                msg = await announce_channel.send(embed=embed, view=deposit_view)
+
                 notice_map[symbol] = msg.id
                 with open("notice_messages.json", "w", encoding="utf-8") as f:
                     json.dump(notice_map, f, indent=2, ensure_ascii=False)
 
-            # 관리자 채널 → 공지 + 등록 버튼
+            # 관리자 채널 → 공지 + 등록 버튼 + 입금 버튼
             if admin_channel:
                 view = RegisterNewTokenView(coin)
+                for item in deposit_view.children:
+                    view.add_item(item)
                 await admin_channel.send(embed=embed, view=view)
 
 
