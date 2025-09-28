@@ -56,6 +56,24 @@ def get_headers(method: str, path: str, params: dict = None, body: str = ""):
         "OK-ACCESS-PROJECT": OKX_PROJECT_ID,
     }
 
+def get_amount_from_tx_eth(tx_hash: str, token_address: str, decimals: int) -> float:
+    """Ethereum 트랜잭션에서 특정 ERC20 전송 수량 확인"""
+    tx_receipt = w3.eth.get_transaction_receipt(tx_hash)
+
+    transfer_topic = w3.keccak(text="Transfer(address,address,uint256)").hex()
+
+    for log in tx_receipt["logs"]:
+        if log["address"].lower() == token_address.lower() and log["topics"][0].hex() == transfer_topic:
+            # ✅ data → int 변환
+            if isinstance(log["data"], (bytes, bytearray)):
+                value = int.from_bytes(log["data"], byteorder="big")
+            else:
+                value = int(log["data"], 16)  # "0x..." 형태인 경우
+
+            value =  value / (10 ** decimals)
+            return value
+
+    return 0.0
 
 # -------------------------------------------------------------------
 # USD → ETH 변환 (quote API 활용)

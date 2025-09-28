@@ -4,3 +4,4 @@ __pycache__/
 *.bat
 *.key
 update_notice.bat
+test.py
