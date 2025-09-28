@@ -5,3 +5,4 @@ __pycache__/
 *.key
 update_notice.bat
 test.py
+read.txt

@@ -404,11 +404,10 @@ async def on_ready():
 
 
 
-@tasks.loop(minutes=1)
+@tasks.loop(minutes=10)
 async def check_new_notices():
-    now = datetime.now(timezone.utc)
-    if now.hour == 14 and now.minute == 40:  # 한국 23:40
-        await process_notices()
+    await process_notices()
+
 
 @check_new_notices.before_loop
 async def before_check_new_notices():
