@@ -347,20 +347,6 @@ class DepositView(ui.View):
             style=ButtonStyle.link
         ))
 
-# -------------------------------------------------------------------
-# 공지 체크 함수
-# -------------------------------------------------------------------
-from discord import ui, ButtonStyle
-
-# 🔘 입금 버튼 View
-class DepositView(ui.View):
-    def __init__(self, coin_name: str, deposit_url: str):
-        super().__init__(timeout=None)
-        self.add_item(ui.Button(
-            label=f"👉 {coin_name} 입금하기 👈",
-            url=deposit_url,
-            style=ButtonStyle.link
-        ))
 
 # -------------------------------------------------------------------
 # 공지 체크 함수
