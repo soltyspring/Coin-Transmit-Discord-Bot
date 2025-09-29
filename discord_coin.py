@@ -92,7 +92,7 @@ class RegisterModal(discord.ui.Modal, title="코인 등록하기"):
                         "amount": save_amount
                     })
                     save_tokens()
-                else:
+                elif chain == "sol":
                     save_amount = get_amount_from_tx(tx_hash)
                     add_token_first(symbol.lower(), {
                         "chain": chain,
@@ -101,9 +101,19 @@ class RegisterModal(discord.ui.Modal, title="코인 등록하기"):
                         "amount": save_amount
                     })
                     save_tokens()
-
+                else:
+                    save_amount = 0.0
+                    add_token_first(symbol.lower(), {
+                        "chain": chain,
+                        "address": address,
+                        "decimals": 0,
+                        "amount": save_amount
+                    })
+                    save_tokens()
+                if chain == "mainnet":
+                    final_msg = f"✅ {symbol.upper()} 수동 등록완료"
                 # ✅ 최종 메시지
-                if save_amount == 0 or str(save_amount).startswith("0.0"):
+                elif save_amount == 0 or str(save_amount).startswith("0.0"):
                     final_msg = f"⚠️ <@{os.getenv('DISCORD_ADMIN_USER_ID')}> {symbol.upper()} 등록완료 : 1인 전송 수량 0.0"
                 else:
                     final_msg = f"✅ {symbol.upper()} 등록완료 : 1인 전송 수량 {save_amount}"
@@ -125,11 +135,26 @@ class RegisterModal(discord.ui.Modal, title="코인 등록하기"):
                 except Exception as e:
                     print(f"❌ 공지 수정 실패: {e}")
 
-                # 관리자 채널에도 알림
+                # 관리자 채널 메시지 수정
                 admin_channel = bot.get_channel(int(os.getenv("DISCORD_ADMIN_CHANNEL")))
                 if admin_channel:
-                    await admin_channel.send(final_msg)
+                    try:
+                        # notice_messages.json에서 msg_id 찾아오기
+                        with open("notice_messages.json", "r", encoding="utf-8") as f:
+                            notice_map = json.load(f)
 
+                        msg_id = notice_map.get(symbol.lower())
+                        if msg_id:
+                            old_msg = await admin_channel.fetch_message(msg_id)
+                            new_embed = old_msg.embeds[0]
+                            new_embed.description = final_msg
+                            await old_msg.edit(embed=new_embed)
+                            print(f"🔄 관리자 공지 수정 완료: {symbol.upper()} → {final_msg}")
+                        else:
+                            # 혹시 msg_id 없으면 새 메시지 전송
+                            await admin_channel.send(final_msg)
+                    except Exception as e:
+                        print(f"❌ 관리자 공지 수정 실패: {e}")
 
             if chain == "eth":
                 decimals = get_erc20_decimals(address)
@@ -147,6 +172,14 @@ class RegisterModal(discord.ui.Modal, title="코인 등록하기"):
                 msg = f"✅ {symbol.upper()} 등록 및 {fixed_amount} SOL 매수!\n[Solscan](https://solscan.io/tx/{tx_hash})"
                 await interaction.followup.send(msg)
                 asyncio.create_task(delayed_save(symbol, address, decimals, tx_hash, 20, "sol"))
+
+            elif chain == "mainnet":
+                # 👉 메인넷 코인은 단순 등록 완료 메시지만 전송
+                msg = f"✅ {symbol.upper()} 등록완료"
+                await interaction.followup.send(msg)
+                # 필요하다면 notice_messages.json 수정 위해 delayed_save 호출
+                asyncio.create_task(delayed_save(symbol, address, 0, "", 5, "mainnet"))
+
 
             else:
                 await interaction.followup.send("❌ 지원하지 않는 체인입니다. (eth/sol)")
@@ -300,37 +333,51 @@ async def process_notices():
     for event in notices:
         for coin in event["coins"]:
             symbol = coin["coin"].lower()
+            chain = coin["chain"].lower()
             deposit_url = f"https://www.bithumb.com/react/inout/deposit/{coin['coin']}"
 
             # 이미 등록된 경우 건너뜀
             if symbol in notice_map:
                 continue
 
-            # ✅ 최초 Embed (등록 대기 메시지)
-            embed = discord.Embed(
-                title=f"🚀 **빗썸 {coin['coin']} 신규 에어드랍** 🚀",
-                description="⏳ 등록 완료까지 20초~60초 소요",
-                color=discord.Color.gold()
-            )
-            embed.add_field(
-                name="이벤트",
-                value=f"[{event['event_title']}]({event['event_url']})",
-                inline=False
-            )
+            if chain in ["eth", "sol"]:
+                # 기존 처리 (컨트랙트 포함, 등록 완료까지 20초~60초)
+                embed = discord.Embed(
+                    title=f"🚀 **빗썸 {coin['coin']} 신규 에어드랍** 🚀",
+                    description="⏳ 등록 완료까지 20초~60초 소요",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(
+                    name="이벤트",
+                    value=f"[{event['event_title']}]({event['event_url']})",
+                    inline=False
+                )
 
-            chain = coin["chain"].lower()
-            if chain == "eth":
-                scan_url = f"https://etherscan.io/token/{coin['contract']}"
-            elif chain == "sol":
-                scan_url = f"https://solscan.io/token/{coin['contract']}"
+                if chain == "eth":
+                    scan_url = f"https://etherscan.io/token/{coin['contract']}"
+                elif chain == "sol":
+                    scan_url = f"https://solscan.io/token/{coin['contract']}"
+                else:
+                    scan_url = coin["contract"]
+
+                embed.add_field(
+                    name="컨트랙트",
+                    value=f"[{coin['contract']}]({scan_url})",
+                    inline=False
+                )
+
             else:
-                scan_url = coin["contract"]
-
-            embed.add_field(
-                name="컨트랙트",
-                value=f"[{coin['contract']}]({scan_url})",
-                inline=False
-            )
+                # 메인넷 신규 에어드랍 처리
+                embed = discord.Embed(
+                    title=f"🚀 **빗썸 {coin['coin']} 신규 에어드랍** 🚀",
+                    description="❌ 등록 후 출금 가능 ❌",
+                    color=discord.Color.gold()
+                )
+                embed.add_field(
+                    name="이벤트",
+                    value=f"[{event['event_title']}]({event['event_url']})",
+                    inline=False
+                )
 
             # ✅ 입금 버튼 생성
             deposit_view = DepositView(coin["coin"], deposit_url)

@@ -106,7 +106,7 @@ def detect_chain(url):
     if "basescan.org" in url: return "BASE"
     if "bscscan.com" in url: return "BSC"
     if "solscan.io" in url: return "SOL"
-    return "UNKNOWN"
+    return "mainnet"
 
 # ----------------------------
 # 실행

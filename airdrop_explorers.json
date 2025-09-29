@@ -1,5 +1,16 @@
 [
   {
+    "event_title": "플라즈마(XPL) 원화 마켓 추가 기념 에어드랍 이벤트",
+    "event_url": "https://feed.bithumb.com/notice/1650174",
+    "coins": [
+      {
+        "chain": "mainnet",
+        "coin": "XPL",
+        "contract": ""
+      }
+    ]
+  },
+  {
     "event_title": "쿠디스(CUDIS) 원화 마켓 추가 기념 에어드랍 이벤트",
     "event_url": "https://feed.bithumb.com/notice/1650116",
     "coins": [
